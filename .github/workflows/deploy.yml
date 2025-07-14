@@ -1,9 +1,6 @@
 name: Paint-Board Docker Image CI
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
