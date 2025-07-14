@@ -87,13 +87,15 @@ async def handle_llm_qa(
     Question: {query}
 
     Answer:"""
-
-        response = perform_completion_with_backoff(
-            provider=config["llm"]["provider"],
-            prompt_with_variables=prompt,
-            api_token=os.environ.get(config["llm"].get("api_key_env", ""))
+        
+        response = perform_completion_with_backoff(  
+            provider=config["llm"]["provider"],  
+            prompt_with_variables=prompt,  
+            api_token=os.environ.get(config["llm"].get("api_key_env", "")),  
+            base_url=config["llm"].get("base_url"),  
+            extra_args=config["llm"].get("extra_args", {})  
         )
-
+        
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"QA processing error: {str(e)}", exc_info=True)
