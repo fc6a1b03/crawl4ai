@@ -1719,11 +1719,13 @@ def extract_xml_data(tags, string):
 
 
 def perform_completion_with_backoff(
+    model,
     provider,
     prompt_with_variables,
-    api_token,
+    api_key,
     json_response=False,
     base_url=None,
+    temperature=0.8,
     **kwargs,
 ):
     """
@@ -1735,9 +1737,10 @@ def perform_completion_with_backoff(
     3. Returns the API response or an error after all retries.
 
     Args:
+        model (str): The name of the API model.
         provider (str): The name of the API provider.
         prompt_with_variables (str): The input prompt for the completion request.
-        api_token (str): The API token for authentication.
+        api_key (str): The API key for authentication.
         json_response (bool): Whether to request a JSON response. Defaults to False.
         base_url (Optional[str]): The base URL for the API. Defaults to None.
         **kwargs: Additional arguments for the API request.
@@ -1752,19 +1755,25 @@ def perform_completion_with_backoff(
     max_attempts = 3
     base_delay = 2  # Base delay in seconds, you can adjust this based on your needs
 
-    extra_args = {"temperature": 0.01, "api_key": api_token, "base_url": base_url}
+    extra_args = {
+        "model": model,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": prompt_with_variables}]
+    }
+
+    if kwargs:
+        extra_args.update(kwargs)
+
     if json_response:
         extra_args["response_format"] = {"type": "json_object"}
-
-    if kwargs.get("extra_args"):
-        extra_args.update(kwargs["extra_args"])
 
     for attempt in range(max_attempts):
         try:
             response = completion(
-                model=provider,
-                messages=[{"role": "user", "content": prompt_with_variables}],
-                **extra_args,
+            	**extra_args,
+                api_key=api_key,
+                base_url=base_url,
+                custom_llm_provider=provider
             )
             return response  # Return the successful response
         except RateLimitError as e:
@@ -3386,4 +3395,3 @@ def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
 def cosine_distance(vec1: np.ndarray, vec2: np.ndarray) -> float:
     """Calculate cosine distance (1 - similarity) between two vectors"""
     return 1 - cosine_similarity(vec1, vec2)
-
