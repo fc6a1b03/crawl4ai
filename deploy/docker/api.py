@@ -90,10 +90,13 @@ async def handle_llm_qa(
         
         response = perform_completion_with_backoff(  
             provider=config["llm"]["provider"],  
+            model=config["llm"]["model"],  
             prompt_with_variables=prompt,  
-            api_token=os.environ.get(config["llm"].get("api_key_env", "")),  
+            api_key=os.environ.get(config["llm"].get("api_key", "")),  
+            json_response=config["llm"].get("json_response",False),
             base_url=config["llm"].get("base_url"),  
-            extra_args=config["llm"].get("extra_args", {})  
+            temperature=config["llm"].get("temperature",0.8),  
+            **config["llm"].get("extra_args", {}) 
         )
         
         return response.choices[0].message.content
