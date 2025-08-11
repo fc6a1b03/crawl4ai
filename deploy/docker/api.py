@@ -22,7 +22,7 @@ from crawl4ai import (
     CacheMode,
     BrowserConfig,
     MemoryAdaptiveDispatcher,
-    RateLimiter, 
+    RateLimiter,
     LLMConfig
 )
 from crawl4ai.utils import perform_completion_with_backoff
@@ -40,7 +40,9 @@ from utils import (
     get_base_url,
     is_task_id,
     should_cleanup_task,
-    decode_redis_hash
+    decode_redis_hash,
+    get_llm_api_key,
+    validate_llm_provider
 )
 
 import psutil, time
@@ -88,18 +90,18 @@ async def handle_llm_qa(
     Question: {query}
 
     Answer:"""
-        
-        response = perform_completion_with_backoff(  
-            provider=config["llm"]["provider"],  
-            model=config["llm"]["model"],  
-            prompt_with_variables=prompt,  
-            api_key=os.environ.get(config["llm"].get("api_key", "")),  
+
+        response = perform_completion_with_backoff(
+            provider=config["llm"]["provider"],
+            model=config["llm"]["model"],
+            prompt_with_variables=prompt,
+            api_key=os.environ.get(config["llm"].get("api_key", "")),
             json_response=config["llm"].get("json_response",False),
-            base_url=config["llm"].get("base_url"),  
-            temperature=config["llm"].get("temperature",0.8),  
-            **config["llm"].get("extra_args", {}) 
+            base_url=config["llm"].get("base_url"),
+            temperature=config["llm"].get("temperature",0.8),
+            **config["llm"].get("extra_args", {})
         )
-        
+
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"QA processing error: {str(e)}", exc_info=True)
@@ -115,19 +117,23 @@ async def process_llm_extraction(
     url: str,
     instruction: str,
     schema: Optional[str] = None,
-    cache: str = "0"
+    cache: str = "0",
+    provider: Optional[str] = None
 ) -> None:
     """Process LLM extraction in background."""
     try:
-        # If config['llm'] has api_key then ignore the api_key_env
-        api_key = ""
-        if "api_key" in config["llm"]:
-            api_key = config["llm"]["api_key"]
-        else:
-            api_key = os.environ.get(config["llm"].get("api_key_env", None), "")
+        # Validate provider
+        is_valid, error_msg = validate_llm_provider(config, provider)
+        if not is_valid:
+            await redis.hset(f"task:{task_id}", mapping={
+                "status": TaskStatus.FAILED,
+                "error": error_msg
+            })
+            return
+        api_key = get_llm_api_key(config, provider)
         llm_strategy = LLMExtractionStrategy(
             llm_config=LLMConfig(
-                provider=config["llm"]["provider"],
+                provider=provider or config["llm"]["provider"],
                 api_token=api_key
             ),
             instruction=instruction,
@@ -174,10 +180,19 @@ async def handle_markdown_request(
     filter_type: FilterType,
     query: Optional[str] = None,
     cache: str = "0",
-    config: Optional[dict] = None
+    config: Optional[dict] = None,
+    provider: Optional[str] = None
 ) -> str:
     """Handle markdown generation requests."""
     try:
+        # Validate provider if using LLM filter
+        if filter_type == FilterType.LLM:
+            is_valid, error_msg = validate_llm_provider(config, provider)
+            if not is_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=error_msg
+                )
         decoded_url = unquote(url)
         if not decoded_url.startswith(('http://', 'https://')):
             decoded_url = 'https://' + decoded_url
@@ -190,8 +205,8 @@ async def handle_markdown_request(
                 FilterType.BM25: BM25ContentFilter(user_query=query or ""),
                 FilterType.LLM: LLMContentFilter(
                     llm_config=LLMConfig(
-                        provider=config["llm"]["provider"],
-                        api_token=os.environ.get(config["llm"].get("api_key_env", None), ""),
+                        provider=provider or config["llm"]["provider"],
+                        api_token=get_llm_api_key(config, provider),
                     ),
                     instruction=query or "Extract main content"
                 )
@@ -209,15 +224,15 @@ async def handle_markdown_request(
                     cache_mode=cache_mode
                 )
             )
-            
+
             if not result.success:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=result.error_message
                 )
 
-            return (result.markdown.raw_markdown 
-                   if filter_type == FilterType.RAW 
+            return (result.markdown.raw_markdown
+                   if filter_type == FilterType.RAW
                    else result.markdown.fit_markdown)
 
     except Exception as e:
@@ -235,11 +250,12 @@ async def handle_llm_request(
     query: Optional[str] = None,
     schema: Optional[str] = None,
     cache: str = "0",
-    config: Optional[dict] = None
+    config: Optional[dict] = None,
+    provider: Optional[str] = None
 ) -> JSONResponse:
     """Handle LLM extraction requests."""
     base_url = get_base_url(request)
-    
+
     try:
         if is_task_id(input_path):
             return await handle_task_status(
@@ -265,7 +281,8 @@ async def handle_llm_request(
             schema,
             cache,
             base_url,
-            config
+            config,
+            provider
         )
 
     except Exception as e:
@@ -309,7 +326,8 @@ async def create_new_task(
     schema: Optional[str],
     cache: str,
     base_url: str,
-    config: dict
+    config: dict,
+    provider: Optional[str] = None
 ) -> JSONResponse:
     """Create and initialize a new task."""
     decoded_url = unquote(input_path)
@@ -318,7 +336,7 @@ async def create_new_task(
 
     from datetime import datetime
     task_id = f"llm_{int(datetime.now().timestamp())}_{id(background_tasks)}"
-    
+
     await redis.hset(f"task:{task_id}", mapping={
         "status": TaskStatus.PROCESSING,
         "created_at": datetime.now().isoformat(),
@@ -333,7 +351,8 @@ async def create_new_task(
         decoded_url,
         query,
         schema,
-        cache
+        cache,
+        provider
     )
 
     return JSONResponse({
@@ -389,7 +408,7 @@ async def stream_results(crawler: AsyncWebCrawler, results_gen: AsyncGenerator) 
                 yield (json.dumps(error_response) + "\n").encode('utf-8')
 
         yield json.dumps({"status": "completed"}).encode('utf-8')
-        
+
     except asyncio.CancelledError:
         logger.warning("Client disconnected during streaming")
     finally:
@@ -410,7 +429,7 @@ async def handle_crawl_request(
     start_time = time.time()
     mem_delta_mb = None
     peak_mem_mb = start_mem_mb
-    
+
     try:
         urls = [('https://' + url) if not url.startswith(('http://', 'https://')) else url for url in urls]
         browser_config = BrowserConfig.load(browser_config)
@@ -422,32 +441,32 @@ async def handle_crawl_request(
                 base_delay=tuple(config["crawler"]["rate_limiter"]["base_delay"])
             ) if config["crawler"]["rate_limiter"]["enabled"] else None
         )
-        
+
         from crawler_pool import get_crawler
         crawler = await get_crawler(browser_config)
 
         # crawler: AsyncWebCrawler = AsyncWebCrawler(config=browser_config)
         # await crawler.start()
-        
+
         base_config = config["crawler"]["base_config"]
-        # Iterate on key-value pairs in global_config then use haseattr to set them 
+        # Iterate on key-value pairs in global_config then use haseattr to set them
         for key, value in base_config.items():
             if hasattr(crawler_config, key):
                 setattr(crawler_config, key, value)
 
         results = []
         func = getattr(crawler, "arun" if len(urls) == 1 else "arun_many")
-        partial_func = partial(func, 
-                                urls[0] if len(urls) == 1 else urls, 
-                                config=crawler_config, 
+        partial_func = partial(func,
+                                urls[0] if len(urls) == 1 else urls,
+                                config=crawler_config,
                                 dispatcher=dispatcher)
         results = await partial_func()
 
         # await crawler.close()
-        
+
         end_mem_mb = _get_memory_mb() # <--- Get memory after
         end_time = time.time()
-        
+
         if start_mem_mb is not None and end_mem_mb is not None:
             mem_delta_mb = end_mem_mb - start_mem_mb # <--- Calculate delta
             peak_mem_mb = max(peak_mem_mb if peak_mem_mb else 0, end_mem_mb) # <--- Get peak memory
@@ -461,7 +480,7 @@ async def handle_crawl_request(
             if result_dict.get('pdf') is not None:
                 result_dict['pdf'] = b64encode(result_dict['pdf']).decode('utf-8')
             processed_results.append(result_dict)
-            
+
         return {
             "success": True,
             "results": processed_results,
@@ -543,7 +562,7 @@ async def handle_stream_crawl_request(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
-        
+
 async def handle_crawl_job(
     redis,
     background_tasks: BackgroundTasks,
